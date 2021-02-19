@@ -13,7 +13,8 @@
       - CompoMe::String ca_cert_file WITH ""
     PORT:
       - OUT
-    SWIG: true
+    OPTIONS:
+      SWIG: true
 
 - LINK:
     NAME: CompoMe::Posix::Https_server_map_in
@@ -26,4 +27,5 @@
       - CompoMe::String key_file
     PORT:
       - MAP_IN
-    SWIG: true
+    OPTIONS:
+      SWIG: true
