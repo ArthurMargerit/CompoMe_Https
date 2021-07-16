@@ -18,7 +18,7 @@ const char *mbedtls_error_wrp(int ret, char *buf = nullptr, size_t buflen = 0) {
 #endif
 } // namespace
 
-boolx Https_server_in::accept() {
+bool Https_server_in::accept() {
   mbedtls_net_init(&this->ssl_fds[this->i_fds]);
 
   int ret = mbedtls_net_accept(&this->ssl_fds[0], &this->ssl_fds[this->i_fds],
