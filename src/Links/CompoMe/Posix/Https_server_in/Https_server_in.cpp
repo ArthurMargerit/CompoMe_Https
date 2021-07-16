@@ -1,4 +1,4 @@
-#include "Links/CompoMe/Posix/Https_server_map_in/Https_server_map_in.hpp"
+#include "Links/CompoMe/Posix/Https_server_in/Https_server_in.hpp"
 #include "CompoMe/Log.hpp"
 #include "CompoMe/Tools/Http/Call.hpp"
 #include "Interfaces/Interface.hpp"
@@ -6,7 +6,6 @@
 namespace CompoMe {
 
 namespace Posix {
-
 namespace {
 #if defined(COMPOME_LOG) && COMPOME_LOG
 const char *mbedtls_error_wrp(int ret, char *buf = nullptr, size_t buflen = 0) {
@@ -21,7 +20,10 @@ const char *mbedtls_error_wrp(int ret, char *buf = nullptr, size_t buflen = 0) {
 #endif
 } // namespace
 
-Https_server_map_in::Https_server_map_in() : CompoMe::Link() {
+Https_server_in::Https_server_in() : CompoMe::Link(), main(), many() {
+  this->main.set_link(*this);
+  this->many.set_link(*this);
+
   mbedtls_ssl_config_init(&this->conf);
   mbedtls_x509_crt_init(&this->srvcert);
   mbedtls_pk_init(&this->pkey);
@@ -29,7 +31,7 @@ Https_server_map_in::Https_server_map_in() : CompoMe::Link() {
   mbedtls_ctr_drbg_init(&this->ctr_drbg);
 }
 
-Https_server_map_in::~Https_server_map_in() {
+Https_server_in::~Https_server_in() {
   mbedtls_x509_crt_free(&this->srvcert);
   mbedtls_pk_free(&this->pkey);
   mbedtls_ssl_config_free(&this->conf);
@@ -37,50 +39,10 @@ Https_server_map_in::~Https_server_map_in() {
   mbedtls_entropy_free(&this->entropy);
 }
 
-bool Https_server_map_in::accept() {
-  mbedtls_net_init(&this->ssl_fds[this->i_fds]);
-
-  int ret = mbedtls_net_accept(&this->ssl_fds[0], &this->ssl_fds[this->i_fds],
-                               NULL, 0, NULL);
-
-  if (ret != 0) {
-    C_ERROR_TAG("https,accept", "accept on fd=", this->ssl_fds[this->i_fds].fd,
-                " ", mbedtls_error_wrp(ret));
-    return false;
-  }
-
-  this->fds[this->i_fds].fd = this->ssl_fds[this->i_fds].fd;
-  this->fds[this->i_fds].events = POLLIN | POLLHUP | POLLERR;
-  this->fds[this->i_fds].revents = 0;
-  mbedtls_ssl_init(&this->ssl[this->i_fds]);
-  ret = mbedtls_ssl_setup(&this->ssl[this->i_fds], &this->conf);
-  if (ret != 0) {
-    C_ERROR_TAG("https,stuff", "ssl setup - ", mbedtls_error_wrp(ret));
-    return false;
-  }
-  mbedtls_ssl_set_bio(&this->ssl[this->i_fds], &this->ssl_fds[this->i_fds],
-                      mbedtls_net_send, mbedtls_net_recv, NULL);
-
-  while ((ret = mbedtls_ssl_handshake(&this->ssl[this->i_fds])) != 0) {
-    if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-      C_ERROR_TAG("https,accept,handshake", "on fd=", this->fds[this->i_fds].fd,
-                  " ", mbedtls_error_wrp(ret));
-      return false;
-    }
-  }
-
-  //  this->fds[0].revents = this->fds[0].revents - POLLIN; // remove it
-  C_INFO_TAG("https,server,recv", "new client fd=", this->fds[this->i_fds].fd);
-
-  this->i_fds++;
-  return true;
-}
-
-void Https_server_map_in::step() {
+void Https_server_in::step() {
   Link::step();
 
-  int ret;
-  ret = poll(this->fds, this->i_fds, 0);
+  int ret = poll(this->fds, this->i_fds, 0);
   if (ret == 0) {
     // C_DEBUG("Timeout Poll() on socket");
     return;
@@ -102,7 +64,7 @@ void Https_server_map_in::step() {
   }
 
   if (this->fds[0].revents & POLLHUP) {
-    this->disconnect();
+    this->main_disconnect();
   }
 
   for (int i = 1; i < this->i_fds; i++) {
@@ -113,99 +75,34 @@ void Https_server_map_in::step() {
 
     if (this->fds[i].revents & POLLIN) {
       if (!this->read(i)) {
-        this->disconnect(i);
+        this->one_disconnect(i);
         i--;
         continue;
       }
 
       C_INFO_TAG("https,recv", "mess fd=", this->fds[i].fd,
-                 " recv:" , this->buf);
-      auto r = CompoMe::Tools::Http::call(this->get_map_of_caller_stream(),
-                                          (char *)this->buf);
-      C_INFO_TAG("https,send", "mess fd=", this->fds[i].fd,
-                 " send:" , r.second);
-      this->write(i,r.second);
+                 " recv:", this->buf);
+      auto r = CompoMe::Tools::Http::call(
+          this->get_main().get_interface(),
+          this->get_many().get_interfaces_list(), (char *)buf);
 
+      C_INFO_TAG("https,send", "mess fd=", this->fds[i].fd, " send:", r.second);
+      this->write(i, r.second);
     }
 
     if (this->fds[i].revents & POLLHUP) {
-      this->disconnect(i);
+      this->one_disconnect(i);
       i--;
       continue;
     }
   }
 }
 
-bool Https_server_map_in::write(int i, const std::string& r) {
-  int ret = mbedtls_ssl_write(&this->ssl[i],
-                              (const unsigned char *)r.c_str(),
-                              r.length());
+void Https_server_in::main_connect() {
+  Link::main_connect();
 
-  if(ret > 0 ){
-  return true;
-   }else if (ret == MBEDTLS_ERR_NET_CONN_RESET) {
-      C_ERROR_TAG("https,write", "on fd=", this->fds[i].fd,
-                  " ssl conn reset");
-      return false;
-    } else if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
-        ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-      C_ERROR_TAG("https,write", "on fd=", this->fds[i].fd,
-                  " ret != (SSL_WANT_READ&SSL_WANT_WRITE)");
-      return false;
-    }
+  C_INFO_TAG("https,server", "Connection");
 
-    return false;
-}
-
-bool Https_server_map_in::read(int i) {
-  int ret =
-      mbedtls_ssl_read(&this->ssl[i], this->buf, this->get_max_request_size());
-
-  if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-    C_ERROR_TAG("https,read", "on fd=", this->fds[i].fd,
-                " ret != of SSL_WANT_WRITE or SSL_WANT_READ");
-    return false;
-  }
-
-  if (ret <= 0) {
-    switch (ret) {
-    case MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY:
-      C_INFO_TAG("https,read", "on fd=", this->fds[i].fd, " ssl peer close");
-      return false;
-
-    case MBEDTLS_ERR_NET_CONN_RESET:
-      C_ERROR_TAG("https,read", "on fd=", this->fds[i].fd, " ssl conn reset");
-      return false;
-
-    default:
-      return false;
-    }
-  }
-
-  this->buf[ret] = '\0';
-  return true;
-}
-
-void Https_server_map_in::disconnect(int i) {
-  C_INFO_TAG("https,client", "client out fd=", this->fds[i].fd);
-  mbedtls_net_free(&this->ssl_fds[i]);
-  mbedtls_ssl_free(&this->ssl[i]);
-
-  // if it's the lastone
-  if (i != this->i_fds - 1) {
-  // swap it with the lastone
-  this->ssl_fds[i] = this->ssl_fds[this->i_fds - 1];
-  this->ssl[i] = this->ssl[this->i_fds - 1];
-  this->fds[i].fd = this->fds[this->i_fds - 1].fd;
-  this->fds[i].events = this->fds[this->i_fds - 1].events;
-  this->fds[i].revents = this->fds[this->i_fds - 1].revents;
-  }
-  
-  this->i_fds--;
-}
-
-void Https_server_map_in::connect() {
-  Link::connect();
   int ret;
 
   // 1. Load the certificates and private RSA key
@@ -283,7 +180,7 @@ void Https_server_map_in::connect() {
     if (this->fds == nullptr) {
       C_ERROR_TAG("https,malloc", "Malloc failed for fds size asked is ",
                   (this->get_max_client() + 1) * sizeof(*this->fds));
-      this->disconnect();
+      this->main_disconnect();
       return;
     }
 
@@ -294,13 +191,31 @@ void Https_server_map_in::connect() {
     this->fds[0].revents = 0;
     this->i_fds = 1; // listening socket
   }
+
+  C_INFO_TAG("https,server", "Connected to" , this->get_addr(), this->get_port());
 }
 
-void Https_server_map_in::disconnect() {
-  Link::disconnect();
+void Https_server_in::one_disconnect(int i) {
+  C_INFO_TAG("https,client", "client out fd=", this->fds[i].fd);
+  mbedtls_net_free(&this->ssl_fds[i]);
+  mbedtls_ssl_free(&this->ssl[i]);
 
-  if (this->fds != nullptr &&
-      this->fds[0].fd != -1) {
+  // if it's the lastone
+  if (i != this->i_fds - 1) {
+    // swap it with the lastone
+    this->ssl_fds[i] = this->ssl_fds[this->i_fds - 1];
+    this->ssl[i] = this->ssl[this->i_fds - 1];
+    this->fds[i].fd = this->fds[this->i_fds - 1].fd;
+    this->fds[i].events = this->fds[this->i_fds - 1].events;
+    this->fds[i].revents = this->fds[this->i_fds - 1].revents;
+  }
+
+  this->i_fds--;
+}
+
+void Https_server_in::main_disconnect() {
+  Link::main_disconnect();
+  if (this->fds != nullptr && this->fds[0].fd != -1) {
     mbedtls_net_free(&this->ssl_fds[0]);
     this->fds[0].fd = -1;
   }
@@ -336,56 +251,19 @@ void Https_server_map_in::disconnect() {
   this->buf = nullptr;
 }
 
-// Get and set /////////////////////////////////////////////////////////////
+// one connect
+void Https_server_in::one_connect(CompoMe::Require_helper &p_r,
+                                  CompoMe::String p_key) {}
 
-CompoMe::String Https_server_map_in::get_addr() const { return this->addr; }
+void Https_server_in::one_connect(CompoMe::Interface &p_i,
+                                  CompoMe::String p_key) {}
 
-void Https_server_map_in::set_addr(const CompoMe::String p_addr) {
-  this->addr = p_addr;
-}
+// one disconnect
+void Https_server_in::one_disconnect(CompoMe::Require_helper &p_r,
+                                     CompoMe::String p_key) {}
 
-CompoMe::String &Https_server_map_in::a_addr() { return this->addr; }
-i32 Https_server_map_in::get_port() const { return this->port; }
-
-void Https_server_map_in::set_port(const i32 p_port) { this->port = p_port; }
-
-i32 &Https_server_map_in::a_port() { return this->port; }
-ui32 Https_server_map_in::get_max_client() const { return this->max_client; }
-
-void Https_server_map_in::set_max_client(const ui32 p_max_client) {
-  this->max_client = p_max_client;
-}
-
-ui32 &Https_server_map_in::a_max_client() { return this->max_client; }
-ui32 Https_server_map_in::get_max_request_size() const {
-  return this->max_request_size;
-}
-
-void Https_server_map_in::set_max_request_size(const ui32 p_max_request_size) {
-  this->max_request_size = p_max_request_size;
-}
-
-ui32 &Https_server_map_in::a_max_request_size() {
-  return this->max_request_size;
-}
-CompoMe::String Https_server_map_in::get_cert_file() const {
-  return this->cert_file;
-}
-
-void Https_server_map_in::set_cert_file(const CompoMe::String p_cert_file) {
-  this->cert_file = p_cert_file;
-}
-
-CompoMe::String &Https_server_map_in::a_cert_file() { return this->cert_file; }
-CompoMe::String Https_server_map_in::get_key_file() const {
-  return this->key_file;
-}
-
-void Https_server_map_in::set_key_file(const CompoMe::String p_key_file) {
-  this->key_file = p_key_file;
-}
-
-CompoMe::String &Https_server_map_in::a_key_file() { return this->key_file; }
+void Https_server_in::one_disconnect(CompoMe::Interface &p_i,
+                                     CompoMe::String p_key) {}
 
 } // namespace Posix
 

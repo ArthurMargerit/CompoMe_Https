@@ -12,12 +12,13 @@
       - CompoMe::String to WITH "/"
       - CompoMe::String ca_cert_file WITH ""
     PORT:
-      - OUT
+      - CompoMe::Stream::out main
+      - CompoMe::Stream::map_out many
     OPTIONS:
       SWIG: true
 
 - LINK:
-    NAME: CompoMe::Posix::Https_server_map_in
+    NAME: CompoMe::Posix::Https_server_in
     DATA:
       - CompoMe::String addr WITH "127.0.0.1"
       - i32 port WITH 10443
@@ -26,6 +27,7 @@
       - CompoMe::String cert_file
       - CompoMe::String key_file
     PORT:
-      - MAP_IN
+      - CompoMe::Stream::in main
+      - CompoMe::Stream::map_in many
     OPTIONS:
       SWIG: true
