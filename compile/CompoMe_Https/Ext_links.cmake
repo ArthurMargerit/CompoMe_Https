@@ -1,1 +1,1 @@
-set(_links_lib ${_links_lib} -lmbedtls -lmbedx509 -lmbedcrypto)
+LIST(APPEND _links_lib -lmbedtls -lmbedx509 -lmbedcrypto)
